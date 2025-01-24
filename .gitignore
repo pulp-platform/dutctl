@@ -1,0 +1,7 @@
+**/logs
+**/__pycache__
+sw/**/bin
+sw/**/dump
+sw/**/eval
+sw/**/data
+scratch

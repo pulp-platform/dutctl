@@ -1,0 +1,223 @@
+#! /usr/bin/env python3
+
+# Copyright 2025 ETH Zurich and University of Bologna.
+# Licensed under the Apache License, Version 2.0, see LICENSE for details.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Paul Scheffler <paulsc@iis.ee.ethz.ch>
+# Thomas Benz <tbenz@iis.ee.ethz.ch>
+
+# dutctl: control a chip under test and its supplies remotely.
+
+import sys
+import time
+import argparse
+import pathlib
+import pyvisa as vs
+import signal
+import functools
+from lib import aginstr, dut
+import asyncio
+
+
+TOOL_NAME = 'dutctl'
+CHIP_NAME  = 'Neo'
+NUM_CHIPLETS = 1
+DEF_BAUD = 192000
+
+ACTIONS = ('reset', 'cycle', 'measure', 'run', 'poweroff')
+OCD_ACTIONS = ('reset', 'cycle', 'run')
+
+GDB_BINARY = 'riscv64-unknown-elf-gdb'
+OCD_BINARY = 'openocd'
+PROC_POLL_PERIOD = 0.5
+
+LEAK_WAIT_PERIOD = 0.5
+
+
+# Global event to terminate program
+end_event = asyncio.Event()
+
+
+def parse_and_validate_args(args: list) -> argparse.Namespace:
+    # Determine default directories
+    bin_dir = pathlib.Path(__file__).parent.resolve()
+    default_cfg_dir = bin_dir / 'config'
+    default_log_leaf = f'{TOOL_NAME}_{int(1000*time.time())}'
+    default_log_dir = bin_dir / 'logs' / default_log_leaf
+
+    # Build base parser
+    parser = argparse.ArgumentParser(
+        description=f'{TOOL_NAME}: control {CHIP_NAME} and its power supplies remotely.')
+    parser.add_argument('action',
+        help=f'One of: {", ".join(ACTIONS)}.')
+    parser.add_argument('-i', '--instr', nargs='?', metavar="PSUCFG", 
+        default=default_cfg_dir/'instr.yml', 
+        help='Path to the Instrument config file. The default is `<bindir>/config/instr.yml`.')
+    parser.add_argument('-l', '--logdir', nargs='?', metavar="DIR",
+        default=default_log_dir, 
+        help='Directory for logs. Created and used only when OCD is launched. '
+        f'The default is a subdirectory of `<bindir>/logs` timestamped in the '
+        f'format `{default_log_leaf}`. Measurements are both printed and, '
+        f'if triggered through serial output, written to `<logdir>/measure<chiplet>.json`.')
+    parser.add_argument('-t', '--trst', nargs='?', metavar="SECS",
+        default=0.1, 
+        help='Reset pulse width. The default is `0.1`.')
+    for d in range(NUM_CHIPLETS):
+        group = parser.add_argument_group(f'Chiplet {d}', 
+            f'Arguments specific to chiplet {d} of {CHIP_NAME}.')
+        # With no file argument, we store whether the flag was passed or not (True/False).
+        # We infer from this whether OpenOCD should be run and override the path later.
+        group.add_argument(f'-o{d}', f'--ocd{d}', nargs='?', metavar="OCDCFG",
+            help=f'Runs OpenOCD with the passed config file. ' 
+            f'Usable with the actions {", ".join(OCD_ACTIONS)}. '
+            f'The default argument is `<bindir>/config/openocd.{d}.tcl`. '
+            f'OpenOCD output is logged to `<outdir>/ocd{d}.log.` '
+            f'Terminates {TOOL_NAME} if and when OpenOCD does.', 
+            const=True, default=False)
+        group.add_argument(f'-g{d}', f'--gdb{d}', nargs='?', metavar="GDBSCRIPT",
+            help=f'Runs GDB with the passed script. Usable only with the action run. '
+            f'Implies `--ocd{d}` with its default argument if not passed. '
+            f'GDB output is logged to `<outdir>/gdb{d}.log.` '
+            f'Terminates {TOOL_NAME} if and when GDB or OpenOCD do.')
+        group.add_argument(f'-u{d}', f'--uart{d}', nargs='?', metavar="UARTDEV[:BAUDRATE]",
+            help=f'Observe the output of the passed serial device (default baudrate {DEF_BAUD}) '
+            f'and log it to `<logdir>/uart{d}.log`. Usable only with the action run. If passed, '
+            f'the received output can trigger PSU measurements with control lines of the format '
+            f'`@{TOOL_NAME}:psumeas:<key>:<delay_ms>[:<supply>[:<channel>]]`. It can also add '
+            f' computed results to the measurement JSON with control lines of the format '
+            f'`@{TOOL_NAME}:dutmeas:<key>:<result_string>`.'
+            f' The control lines take effect when their trailing newline (`\\n`) is received.')
+
+    # Parse arguments
+    args = parser.parse_args(args)
+
+    # Check arguments
+    if args.action not in ACTIONS:
+        parser.error(f'action must be one of: {", ".join(ACTIONS)}.')
+    if args.action == 'run':
+        if all((vars(args)[f'gdb{d}'] is None) for d in range(NUM_CHIPLETS)):
+            parser.error(f'action run requires OpenOCD and GDB scripts for at least one chiplet.')
+    else:
+        if any((vars(args)[f'gdb{d}'] is not None 
+                or vars(args)[f'uart{d}'] is not None) for d in range(NUM_CHIPLETS)):
+            parser.error(f'GDB or UART output observation require action run.')
+    if args.action not in OCD_ACTIONS and any((vars(args)[f'ocd{d}'] is not False) 
+            for d in range(NUM_CHIPLETS)):
+        parser.error(f'Launching OpenOCD requires one of the actions {", ".join(OCD_ACTIONS)}.')
+
+    # Extend default args as necessary, check that needed files exist
+    must_exist_files = [args.instr]
+    for d in range(NUM_CHIPLETS):
+        # If --ocd{d} is implicit through --gdb{d} or explicit without arg: set default file.
+        if (vars(args)[f'gdb{d}'] is not None and vars(args)[f'ocd{d}'] is False
+                ) or vars(args)[f'ocd{d}'] == True:  
+            vars(args)[f'ocd{d}'] = default_cfg_dir/f'openocd.{d}.tcl'
+            must_exist_files.append(vars(args)[f'ocd{d}'])
+        # No file passed and none required: pass on None to signal that OCD shall not be launched.
+        elif vars(args)[f'ocd{d}'] in (True, False):
+            vars(args)[f'ocd{d}'] = None
+        # A file is explicitly passed: do not override it and check its existence.
+        else:
+            must_exist_files.append(vars(args)[f'ocd{d}'])
+        # Any GDB file that is passed must exist. Otherwise, it is None and GDB is not launched.
+        if vars(args)[f'gdb{d}'] is not None:
+            must_exist_files.append(vars(args)[f'gdb{d}'])
+    for f in must_exist_files:
+        if not pathlib.Path(f).is_file():
+            parser.error(f'File `{f}` does not exist')
+
+    # Split UART args into path and baudrate
+    for d in range(NUM_CHIPLETS):
+        vars(args)[f'baud{d}'] = DEF_BAUD
+        if vars(args)[f'uart{d}'] is not None and ':' in vars(args)[f'uart{d}']:
+            vars(args)[f'uart{d}'], vars(args)[f'baud{d}'] = vars(args)[f'uart{d}'].split(':')
+
+    # Return arguments
+    return args
+
+
+async def main(args: list) -> int:
+    # Parse and validate args
+    args = parse_and_validate_args(args)
+
+    # Load PSU configs and connect to them
+    instr_cfg = aginstr.config_from_yml(args.instr)
+    rm = vs.ResourceManager()
+    psu_instrs = aginstr.connect_instrs(rm, instr_cfg['supplies'])
+    siggen_instrs = aginstr.connect_instrs(rm, instr_cfg['siggens'])
+    psu_cfgs = instr_cfg['supplies']
+    psus_ganged = instr_cfg['supplies']
+    siggen_cfgs = instr_cfg['siggens']
+
+    print('INFO: connected to instruments')
+
+    # Handle supply management
+    if args.action == 'reset':
+        aginstr.reconf_siggens(siggen_instrs, siggen_cfgs)
+        aginstr.reset(psu_instrs, psu_cfgs, args.trst)
+    elif args.action == 'poweroff':
+        aginstr.siggens_off(siggen_instrs, siggen_cfgs)
+        aginstr.power_off(psu_instrs, psu_cfgs, psus_ganged)
+    elif args.action in ('cycle', 'run'):
+        aginstr.siggens_off(siggen_instrs, siggen_cfgs)
+        aginstr.power_reset_cycle(psu_instrs, psu_cfgs, psus_ganged, args.trst)
+        time.sleep(LEAK_WAIT_PERIOD)
+        await dut.async_meas(psu_instrs, psu_cfgs, name='_leak')
+        aginstr.reconf_siggens(siggen_instrs, siggen_cfgs)
+        aginstr.reset(psu_instrs, psu_cfgs, args.trst)
+    elif args.action == 'measure':
+        await dut.async_meas(psu_instrs, psu_cfgs)
+    else:
+        raise ValueError(f'Unexpected action: {args.action}')
+
+    if not args.action == 'measure':
+        print('INFO: instrument control complete')
+
+    # Handle asynchronous tasks
+    loop = asyncio.get_event_loop()
+    tasks = {}
+    log_dir = pathlib.Path(args.logdir)
+    if args.action in ('reset', 'cycle', 'run'):
+        # Launch OCD as needed
+        for d in range(NUM_CHIPLETS):
+            if vars(args)[f'ocd{d}'] is not None:
+                ocd_path =  log_dir / f'ocd{d}.log'
+                tasks[f'ocd{d}'] = loop.create_task(dut.handle_ocd(
+                    end_event, OCD_BINARY, vars(args)[f'ocd{d}'], ocd_path, PROC_POLL_PERIOD))
+    if args.action == 'run':
+        for d in range(NUM_CHIPLETS):
+            # Launch UART as needed
+            if vars(args)[f'uart{d}'] is not None:
+                meas_path =  log_dir / f'measure{d}.json'
+                out_path =  log_dir / f'uart{d}.log'
+                tasks[f'uart{d}'] = loop.create_task(dut.handle_uart(
+                   end_event, vars(args)[f'uart{d}'], meas_path, out_path, psu_instrs,
+                   psu_cfgs, vars(args)[f'baud{d}'], PROC_POLL_PERIOD, TOOL_NAME))
+            # Launch GDB as needed
+            if vars(args)[f'gdb{d}'] is not None:
+                gdb_path =  log_dir / f'gdb{d}.log'
+                tasks[f'gdb{d}'] = loop.create_task(dut.handle_gdb(
+                    end_event, GDB_BINARY, vars(args)[f'gdb{d}'], gdb_path, PROC_POLL_PERIOD))
+
+    # Collect asynchronous tasks, OR returns
+    results = (await asyncio.gather(*tasks.values())) if len(tasks) else []
+    res_dict = dict(zip(tasks.keys(), results))
+    if len(res_dict):
+        print(f'INFO: subprocess return codes: {res_dict}')
+    return functools.reduce(lambda a, b: a or b, results, 0)
+
+
+def term(signal: int = 0, frame = None):
+    print(f'\nINFO: terminating due to caught signal {signal}')
+    end_event.set()
+
+
+if __name__ == '__main__':
+    # Register termination handlers
+    signal.signal(signal.SIGTERM, term)
+    signal.signal(signal.SIGINT, term)
+    signal.signal(signal.SIGQUIT, term)
+    signal.signal(signal.SIGABRT, term)
+    # Launch main
+    sys.exit(asyncio.run(main(sys.argv[1:])))

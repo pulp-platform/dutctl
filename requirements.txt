@@ -1,0 +1,7 @@
+pyvisa
+pyyaml
+aiofiles
+serial_asyncio
+scipy
+numpy
+hjson
