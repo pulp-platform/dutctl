@@ -1,0 +1,67 @@
+# Copyright 2025 ETH Zurich and University of Bologna.
+# Licensed under the Apache License, Version 2.0, see LICENSE for details.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Paul Scheffler <paulsc@iis.ee.ethz.ch>
+
+name: lint
+
+on: [ push, pull_request, workflow_dispatch ]
+
+jobs:
+
+  lint-license:
+    runs-on: ubuntu-latest
+    steps:
+    -
+      name: Checkout
+      uses: actions/checkout@v4
+    -
+      name: Check license
+      uses: pulp-platform/pulp-actions/lint-license@v2.4.2
+      with:
+        license: |
+          Copyright (\d{4}(-\d{4})?\s)?(ETH Zurich and University of Bologna).
+          Licensed under the Apache License, Version 2.0, see LICENSE for details.
+          SPDX-License-Identifier: Apache-2.0
+    -
+      name: Check license (custom files)
+      run: |
+        set +e
+        nerr=0
+        while read file; do
+            awk 'BEGIN { license = "^" \
+                "# Copyright ([0-9]{4}(-[0-9]{4})? ?)ETH Zurich and University of Bologna[.]\n" \
+                "# Licensed under the Apache License, Version 2[.]0, see LICENSE for details[.]\n" \
+                "# SPDX-License-Identifier: Apache-2[.]0\n?$" }
+              NR <= 3 { lines = lines $0 ORS }
+              NR == 3 {if (lines ~ license) exit 0; else exit 1;}' ${file}
+            if [ $? -ne 0 ]; then
+              echo "FAIL: ${file}"
+              nerr=$((${nerr} + 1))
+            else
+              echo "PASS: ${file}"
+            fi
+        done <<<$(find . -type f -name "*.ocd" -o -name "*.gdb" -o -name "*.dutctl" -o -name "*.conf" -o -name "*.yml.in")
+        exit ${nerr}
+
+  lint-python3:
+    runs-on: ubuntu-latest
+    steps:
+      -
+        name: Checkout
+        uses: actions/checkout@v4
+      -
+        name: Install Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: 3.9
+          cache: pip
+      -
+        name: Install Pylint and requirements
+        run: |
+          pip install -r requirements.txt
+          pip install pylint
+      -
+        name: Run Pylint
+        run: python3 -m pylint src util --rcfile=util/pylintrc

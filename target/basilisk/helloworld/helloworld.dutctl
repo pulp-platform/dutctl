@@ -1,0 +1,14 @@
+# Copyright 2025 ETH Zurich and University of Bologna.
+# Licensed under the Apache License, Version 2.0, see LICENSE for details.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Paul Scheffler <paulsc@iis.ee.ethz.ch>
+# Thomas Benz <tbenz@iis.ee.ethz.ch>
+
+run
+-n1
+-i common/instr.yml
+-o0 common/chip0.ocd
+-g0 helloworld/helloworld.gdb
+--uart0 /dev/ttyUSB0:9600
+-l helloworld/logs
