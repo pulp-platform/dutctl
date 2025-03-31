@@ -1,0 +1,9 @@
+**/__pycache__
+**/.bender
+**/*.elf
+**/*.bin
+**/*.dump
+**/logs
+**/*.log
+**/shmoo/runs*
+**/shmoo/*.pdf

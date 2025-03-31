@@ -1,0 +1,18 @@
+[MESSAGES CONTROL]
+
+# Do not require docstrings
+disable=missing-function-docstring,
+        missing-module-docstring,
+        missing-class-docstring
+# Allow variables 1-2 characters long (lowercase latin only)
+good-names-rgxs=^[a-z][a-z]?$
+
+[DESIGN]
+
+# Relax overly strict maxima a bit
+max-args=10
+max-positional-arguments=10
+max-attributes=10
+max-branches=20
+max-locals=20
+max-statements=60

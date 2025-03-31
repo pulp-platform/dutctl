@@ -1,0 +1,14 @@
+# Copyright 2025 ETH Zurich and University of Bologna.
+# Licensed under the Apache License, Version 2.0, see LICENSE for details.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Paul Scheffler <paulsc@iis.ee.ethz.ch>
+# Thomas Benz <tbenz@iis.ee.ethz.ch>
+
+# Pull in Cheshire to as a dependency to make use of its runtime and build stack.
+
+package:
+  name: dutctl_basilisk
+
+dependencies:
+  cheshire: { git: https://github.com/pulp-platform/cheshire, rev: paulsc/bas-test }

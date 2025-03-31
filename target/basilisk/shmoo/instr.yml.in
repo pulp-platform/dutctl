@@ -1,0 +1,39 @@
+# Copyright 2025 ETH Zurich and University of Bologna.
+# Licensed under the Apache License, Version 2.0, see LICENSE for details.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Paul Scheffler <paulsc@iis.ee.ethz.ch>
+# Thomas Benz <tbenz@iis.ee.ethz.ch>
+
+# Instrument configuration for dutctl.
+# WARNING: Changing these values has real electrical effects on connected DUTs,
+# including potential death; check your config with no DUT unconnected first!
+
+# If the remaining config doesn't hash to `safety_hash`, `dutctl` rejects it as
+# a safety measure. You can bypass this with `0xd0a515a1` at your own risk.
+safety_hash: 0xd0a515a1
+
+siggens:
+
+  A_33600_1:
+    ip: 169.254.36.1
+    sources:
+      1: {freq: __F__.0e6, vhi: 3.0, vlo: 0.2, shape: "SIN", leakoff: true}
+      2: {freq: 48.0e6, vhi: 3.0, vlo: 0.2, shape: "SIN", leakoff: true}
+
+supplies_ganged: true
+
+supplies:
+
+  E36312A_1:
+    ip: 169.254.12.1
+    reset_gpio: 1
+    channels:
+      1: {vol: 3.3, cur: 2.0}
+      2: {vol: 3.3, cur: 1.0}
+      3: {vol: 5.0, cur: 1.0}
+
+  E36231A_1:
+    ip: 169.254.31.1
+    channels:
+      0: {vol: __V__.0e-3, cur: 1.5, volmin: 0.8, volmax: 1.64, measure: true, measure_vol: true}
