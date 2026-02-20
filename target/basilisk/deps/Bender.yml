@@ -11,4 +11,4 @@ package:
   name: dutctl_basilisk
 
 dependencies:
-  cheshire: { git: https://github.com/pulp-platform/cheshire, rev: paulsc/bas-test }
+  cheshire: { git: https://github.com/pulp-platform/cheshire, rev: bringup/basilisk }
